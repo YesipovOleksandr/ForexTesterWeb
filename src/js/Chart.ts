@@ -1,26 +1,41 @@
-import { BarData } from './DataLoader.js';
+import { BarData } from './BarData.js';
+import { TimeScale } from './TimeScale.js';
+import { BarDrawer } from './BarDrawer.js';
+import { PriceScale } from './PriceScale.js';
 
 export class Chart {
     private canvas: HTMLCanvasElement;
     private context: CanvasRenderingContext2D;
-    private data: BarData[];
+    private data: { ChunkStart: number, Bars: BarData[] }[];
     private barWidth: number = 5;
     private offset: number = 0;
     private zoomLevel: number = 1;
     private priceRange: number;
     private minPrice: number;
     private maxPrice: number;
-    private isDragging: boolean = false;
-    private lastMouseX: number = 0;
+    private timeRange: number;
+    private priceScale: PriceScale;
+    private timeScale: TimeScale;
+    private barDrawer: BarDrawer;
 
-    constructor(canvas: HTMLCanvasElement, data: BarData[]) {
+    private isDragging: boolean = false;
+    private startDragX: number = 0;
+    private startDragOffset: number = 0;
+
+    constructor(canvas: HTMLCanvasElement, data: { ChunkStart: number, Bars: BarData[] }[]) {
         this.canvas = canvas;
         this.context = canvas.getContext('2d')!;
         this.data = data;
 
-        this.minPrice = Math.min(...data.map(d => d.low));
-        this.maxPrice = Math.max(...data.map(d => d.high));
+        this.minPrice = Math.min(...this.data.flatMap(chunk => chunk.Bars.map(d => d.Low)));
+        this.maxPrice = Math.max(...this.data.flatMap(chunk => chunk.Bars.map(d => d.High)));
         this.priceRange = this.maxPrice - this.minPrice;
+
+        this.timeRange = this.data[this.data.length - 1].ChunkStart - this.data[0].ChunkStart;
+
+        this.priceScale = new PriceScale(this.canvas, this.priceRange, this.minPrice);
+        this.timeScale = new TimeScale(this.canvas, this.data, this.barWidth, this.zoomLevel, this.offset);
+        this.barDrawer = new BarDrawer(this.canvas, this.priceRange, this.minPrice, this.barWidth, this.zoomLevel);
 
         this.initEventHandlers();
         this.render();
@@ -29,91 +44,59 @@ export class Chart {
     private initEventHandlers() {
         this.canvas.addEventListener('wheel', (event) => {
             event.preventDefault();
-            if (event.shiftKey) {
-                this.handleZoom(event);
-            } else {
-                this.handleScroll(event);
+            this.handleScroll(event);  
+        });
+
+
+        this.canvas.addEventListener('mousedown', (event) => {
+            if (event.button === 0) {  
+                this.isDragging = true;
+                this.startDragX = event.clientX;
+                this.startDragOffset = this.offset;
             }
         });
 
-        this.canvas.addEventListener('mousedown', (event) => this.handleMouseDown(event));
-        this.canvas.addEventListener('mousemove', (event) => this.handleMouseMove(event));
-        this.canvas.addEventListener('mouseup', () => this.handleMouseUp());
-        this.canvas.addEventListener('mouseleave', () => this.handleMouseUp());
-    }
+        this.canvas.addEventListener('mouseup', () => {
+            this.isDragging = false;
+        });
 
-    private handleMouseDown(event: MouseEvent) {
-        this.isDragging = true;
-        this.lastMouseX = event.clientX;
-    }
-
-    private handleMouseMove(event: MouseEvent) {
-        if (this.isDragging) {
-            const deltaX = event.clientX - this.lastMouseX;
-            this.offset += deltaX;
-            this.offset = Math.max(0, this.offset); 
-            this.lastMouseX = event.clientX;
-            this.render();
-        }
-    }
-
-    private handleMouseUp() {
-        this.isDragging = false;
+        this.canvas.addEventListener('mousemove', (event) => {
+            if (this.isDragging) {
+                const deltaX = event.clientX - this.startDragX;
+                this.offset = this.startDragOffset + deltaX;
+                this.offset = Math.max(0, this.offset); 
+                this.render();
+            }
+        });
     }
 
     private handleScroll(event: WheelEvent) {
-        this.offset += event.deltaY > 0 ? 20 : -20;
-        this.offset = Math.max(0, this.offset); 
-        this.render();
-    }
-
-    private handleZoom(event: WheelEvent) {
-        this.zoomLevel += event.deltaY > 0 ? -0.1 : 0.1;
-        this.zoomLevel = Math.max(0.5, Math.min(2, this.zoomLevel)); 
+        const scrollDirection = event.deltaY > 0 ? 1 : -1;
+        this.offset += scrollDirection * 20;
+        this.offset = Math.max(0, this.offset);
         this.render();
     }
 
     private render() {
         this.clearCanvas();
-        this.drawBars();
+        this.barDrawer.draw(this.getVisibleBars());
+        this.priceScale.draw();
+        this.timeScale.draw();
     }
 
     private clearCanvas() {
         this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
     }
 
-    private drawBars() {
-        // Calculate the visible bars based on zoom level
+    private getVisibleBars() {
         const visibleBars = Math.floor(this.canvas.width / (this.barWidth * this.zoomLevel));
         const startIdx = Math.floor(this.offset / this.barWidth);
-        const bars = this.data.slice(startIdx, startIdx + visibleBars);
-
-        // Scale factor for prices (to fit within the canvas height)
-        const priceScale = (this.canvas.height - 50) / this.priceRange;
-
-        bars.forEach((bar, index) => {
-            const x = index * this.barWidth * this.zoomLevel;
-            const openY = this.canvas.height - 50 - (bar.open - this.minPrice) * priceScale;
-            const closeY = this.canvas.height - 50 - (bar.close - this.minPrice) * priceScale;
-            const highY = this.canvas.height - 50 - (bar.high - this.minPrice) * priceScale;
-            const lowY = this.canvas.height - 50 - (bar.low - this.minPrice) * priceScale;
-
-            this.context.strokeStyle = bar.close > bar.open ? 'green' : 'red';
-            this.context.beginPath();
-            this.context.moveTo(x + this.barWidth * this.zoomLevel / 2, highY);
-            this.context.lineTo(x + this.barWidth * this.zoomLevel / 2, lowY);
-            this.context.stroke();
-
-            const bodyTop = Math.min(openY, closeY);
-            const bodyBottom = Math.max(openY, closeY);
-
-            this.context.fillStyle = bar.close > bar.open ? 'green' : 'red';
-            this.context.fillRect(
-                x,
-                bodyTop,
-                this.barWidth * this.zoomLevel,
-                bodyBottom - bodyTop
-            );
+        let bars: BarData[] = [];
+        let idx = startIdx;
+        this.data.forEach(chunk => {
+            bars = bars.concat(chunk.Bars.slice(idx, idx + visibleBars));
+            if (bars.length >= visibleBars) return;
         });
+        return bars.slice(0, visibleBars);
     }
 }
